@@ -19,6 +19,14 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           script: |
             set -e
+            export PATH="$HOME/.cargo/bin:$PATH"
+            if ! command -v rustup >/dev/null 2>&1; then
+              curl https://sh.rustup.rs -sSf | sh -s -- -y
+              export PATH="$HOME/.cargo/bin:$PATH"
+            fi
+            rustup toolchain install stable --profile minimal
+            rustup default stable
+
             cd /home/apps/sq/.dbs/infrastructure/astra-gateway
             git fetch --all --prune
             git reset --hard origin/main
