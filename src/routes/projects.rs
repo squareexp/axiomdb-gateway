@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/:project_id", get(get_project))
+        .route("/projects/:project_id/credentials", get(get_project_credentials))
 }
 
 // ---------------------------------------------------------------------------
@@ -202,4 +203,43 @@ async fn get_project(
             .await?;
 
     Ok(Json(json!({ "project": project, "databases": databases })))
+}
+
+async fn get_project_credentials(
+    State(state): State<AppState>,
+    AuthUser(_claims): AuthUser,
+    Path(project_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>> {
+    let db_row = sqlx::query_as::<_, ProjectDatabase>(
+        "SELECT * FROM project_databases WHERE project_id=$1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    let env_contents = std::fs::read_to_string("/home/opsdc/.creds/zone.env")
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("failed reading env store: {e}")))?;
+
+    let lookup = |key: &str| -> Option<String> {
+        env_contents
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}=")).map(|v| v.to_string()))
+    };
+
+    let runtime_url = lookup(&db_row.runtime_key).ok_or_else(|| {
+        AppError::NotFound
+    })?;
+    let direct_url = lookup(&db_row.direct_key).ok_or_else(|| {
+        AppError::NotFound
+    })?;
+
+    Ok(Json(json!({
+        "project_id": project_id,
+        "database": db_row.database_name,
+        "runtime_key": db_row.runtime_key,
+        "direct_key": db_row.direct_key,
+        "database_url": runtime_url,
+        "direct_url": direct_url
+    })))
 }
