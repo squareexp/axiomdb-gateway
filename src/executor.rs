@@ -60,6 +60,24 @@ pub async fn run_provision(
         }
     })?;
 
+    // Backward compatibility: older square-dbctl versions don't support --json.
+    let output = if !output.status.success()
+        && String::from_utf8_lossy(&output.stderr).contains("unknown argument: --json")
+    {
+        info!("executor: dbctl has no --json support; retrying without --json");
+        tokio::time::timeout(
+            Duration::from_secs(PROVISION_TIMEOUT_SECS),
+            Command::new(dbctl_bin)
+                .args(["provision", "--app", app, "--env", env])
+                .output(),
+        )
+        .await
+        .map_err(|_| ExecError::Timeout(PROVISION_TIMEOUT_SECS))?
+        .map_err(ExecError::Io)?
+    } else {
+        output
+    };
+
     let exit_code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
