@@ -1,13 +1,18 @@
-name: Deploy astra-gateway
+name: Deploy axiomdb-gateway
 
 on:
   push:
     branches: ["main"]
   workflow_dispatch:
 
+concurrency:
+  group: axiomdb-gateway-production
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Deploy by building on VPS (glibc-compatible)
@@ -18,20 +23,31 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT }}
           script: |
-            set -e
+            set -euo pipefail
             export PATH="$HOME/.cargo/bin:$PATH"
             if ! command -v rustup >/dev/null 2>&1; then
               curl https://sh.rustup.rs -sSf | sh -s -- -y
               export PATH="$HOME/.cargo/bin:$PATH"
             fi
-            rustup toolchain install stable --profile minimal
-            rustup default stable
+            rustup toolchain install stable --profile minimal --component rustfmt --component clippy
 
             cd /home/apps/sq/.dbs/infrastructure/astra-gateway
             git fetch --all --prune
             git reset --hard origin/main
+
+            if [ -f /home/opsdc/.creds/astradb-core.env ]; then
+              set -a
+              . /home/opsdc/.creds/astradb-core.env
+              set +a
+            fi
+            chmod +x ./migrate.sh
+            ./migrate.sh
+
             cargo build --release
-            sudo install -m 0755 target/release/astra-db /usr/local/bin/astra-db
+            sudo install -m 0755 target/release/axiomdb-gateway /usr/local/bin/axiomdb-gateway
+            sudo ln -sfn /usr/local/bin/axiomdb-gateway /usr/local/bin/astra-db
+            sudo install -m 0644 astradb-core.service /etc/systemd/system/astradb-core.service
+            sudo systemctl daemon-reload
             sudo systemctl restart astradb-core
             sudo systemctl is-active astradb-core
-            curl -skI https://opsdc.squareexp.com | head -n 1
+            curl -fsS https://opsdc.squareexp.com/api/v1/health >/dev/null || curl -skI https://opsdc.squareexp.com | head -n 1

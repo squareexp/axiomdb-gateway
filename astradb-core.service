@@ -1,5 +1,5 @@
 [Unit]
-Description=astradb-core Rust control plane
+Description=AxiomDB gateway Rust control plane
 After=network.target postgresql.service
 
 [Service]
@@ -8,7 +8,7 @@ User=opsdc
 Group=opsdc
 WorkingDirectory=/home/opsdc
 EnvironmentFile=/home/opsdc/.creds/astradb-core.env
-ExecStart=/usr/local/bin/astra-db
+ExecStart=/usr/local/bin/axiomdb-gateway
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal

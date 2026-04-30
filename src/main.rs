@@ -20,8 +20,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Init tracing
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "astra_db=debug,tower_http=info".into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "astra_db=debug,tower_http=info".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
@@ -30,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Connect to control-plane DB
     let pool = db::connect(&cfg.database_url).await?;
+    db::assert_schema_ready(&pool).await?;
 
     let app_state = state::AppState::new(pool, cfg.clone());
 

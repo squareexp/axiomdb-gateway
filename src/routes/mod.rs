@@ -1,15 +1,16 @@
 pub mod auth;
-pub mod projects;
-pub mod branches;
-pub mod tables;
-pub mod monitoring;
 pub mod backups;
-pub mod network;
-pub mod secrets;
+pub mod branches;
+pub mod health;
 pub mod jobs;
+pub mod monitoring;
+pub mod network;
+pub mod projects;
+pub mod secrets;
+pub mod tables;
 
-use axum::{middleware, Router};
 use crate::state::AppState;
+use axum::{middleware, Router};
 
 /// Build the full /api/v1 router.
 pub fn build(state: AppState) -> Router {
@@ -29,6 +30,7 @@ pub fn build(state: AppState) -> Router {
 
     Router::new()
         .merge(auth::router())
+        .merge(health::router())
         .merge(protected)
         .with_state(state)
 }

@@ -124,12 +124,10 @@ async fn delete_branch(
     .await?
     .ok_or(AppError::NotFound)?;
 
-    sqlx::query(
-        "UPDATE project_branches SET status='deleted' WHERE id=$1",
-    )
-    .bind(branch.id)
-    .execute(&state.db)
-    .await?;
+    sqlx::query("UPDATE project_branches SET status='deleted' WHERE id=$1")
+        .bind(branch.id)
+        .execute(&state.db)
+        .await?;
 
     sqlx::query(
         "INSERT INTO audit_events (actor_user_id, action, target_type, target_id, metadata)

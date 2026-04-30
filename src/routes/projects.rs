@@ -16,11 +16,18 @@ use crate::{
     state::AppState,
 };
 
+const CANONICAL_DB_HOST: &str = "db.squareexp.com";
+const RUNTIME_DB_PORT: u16 = 6432;
+const DIRECT_DB_PORT: u16 = 5432;
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/:project_id", get(get_project))
-        .route("/projects/:project_id/credentials", get(get_project_credentials))
+        .route(
+            "/projects/:project_id/credentials",
+            get(get_project_credentials),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -75,12 +82,10 @@ async fn create_project(
     .await?;
 
     // Mark running
-    sqlx::query(
-        "UPDATE provisioning_jobs SET status='running', started_at=now() WHERE id=$1",
-    )
-    .bind(job_id)
-    .execute(&state.db)
-    .await?;
+    sqlx::query("UPDATE provisioning_jobs SET status='running', started_at=now() WHERE id=$1")
+        .bind(job_id)
+        .execute(&state.db)
+        .await?;
 
     // Step 2: Execute real VPS provision via square-dbctl
     let prov = match executor::run_provision(&state.cfg.dbctl_bin, &app, &env).await {
@@ -227,12 +232,10 @@ async fn get_project_credentials(
             .find_map(|line| line.strip_prefix(&format!("{key}=")).map(|v| v.to_string()))
     };
 
-    let runtime_url = lookup(&db_row.runtime_key).ok_or_else(|| {
-        AppError::NotFound
-    })?;
-    let direct_url = lookup(&db_row.direct_key).ok_or_else(|| {
-        AppError::NotFound
-    })?;
+    let runtime_url = lookup(&db_row.runtime_key).ok_or(AppError::NotFound)?;
+    let direct_url = lookup(&db_row.direct_key).ok_or(AppError::NotFound)?;
+    let runtime_url = canonical_project_url(&runtime_url, RUNTIME_DB_PORT)?;
+    let direct_url = canonical_project_url(&direct_url, DIRECT_DB_PORT)?;
 
     Ok(Json(json!({
         "project_id": project_id,
@@ -242,4 +245,79 @@ async fn get_project_credentials(
         "database_url": runtime_url,
         "direct_url": direct_url
     })))
+}
+
+fn canonical_project_url(raw: &str, port: u16) -> Result<String> {
+    let url = raw.trim().trim_matches('"').trim_matches('\'');
+    let body = url.strip_prefix("postgresql://").ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!(
+            "stored Postgres URL must use postgresql://"
+        ))
+    })?;
+    let (userinfo, host_path) = body.split_once('@').ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!(
+            "stored Postgres URL is missing credentials"
+        ))
+    })?;
+    let (_, db_and_query) = host_path.split_once('/').ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!(
+            "stored Postgres URL is missing database name"
+        ))
+    })?;
+    let (database, query) = db_and_query
+        .split_once('?')
+        .map_or((db_and_query, ""), |(database, query)| (database, query));
+
+    if userinfo.is_empty() || database.is_empty() {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "stored Postgres URL is incomplete"
+        )));
+    }
+
+    let mut params = vec!["sslmode=require".to_string()];
+    params.extend(
+        query
+            .split('&')
+            .filter(|part| !part.is_empty())
+            .filter(|part| !part.starts_with("sslmode="))
+            .map(str::to_string),
+    );
+
+    Ok(format!(
+        "postgresql://{userinfo}@{CANONICAL_DB_HOST}:{port}/{database}?{}",
+        params.join("&")
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonical_project_url, DIRECT_DB_PORT, RUNTIME_DB_PORT};
+
+    #[test]
+    fn canonicalizes_runtime_url_to_public_pooler() {
+        let got = canonical_project_url(
+            "postgresql://app:pass@127.0.0.1:5432/sq_app_dev?sslmode=disable",
+            RUNTIME_DB_PORT,
+        )
+        .unwrap();
+
+        assert_eq!(
+            got,
+            "postgresql://app:pass@db.squareexp.com:6432/sq_app_dev?sslmode=require"
+        );
+    }
+
+    #[test]
+    fn canonicalizes_direct_url_and_preserves_extra_params() {
+        let got = canonical_project_url(
+            "\"postgresql://owner:pass@internal:6543/sq_app_dev?connect_timeout=10\"",
+            DIRECT_DB_PORT,
+        )
+        .unwrap();
+
+        assert_eq!(
+            got,
+            "postgresql://owner:pass@db.squareexp.com:5432/sq_app_dev?sslmode=require&connect_timeout=10"
+        );
+    }
 }

@@ -15,6 +15,12 @@ pub struct User {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+
+    // 2FA Fields
+    pub two_factor_enabled: bool,
+    pub two_factor_method: Option<String>,
+    pub two_factor_secret: Option<String>,
+    pub two_factor_setup_completed: bool,
 }
 
 /// Subset returned to callers (no password_hash).
@@ -28,6 +34,10 @@ pub struct UserPublic {
 
 impl From<User> for UserPublic {
     fn from(u: User) -> Self {
-        Self { id: u.id, email: u.email, role: u.role }
+        Self {
+            id: u.id,
+            email: u.email,
+            role: u.role,
+        }
     }
 }

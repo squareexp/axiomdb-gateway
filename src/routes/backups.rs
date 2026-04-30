@@ -34,13 +34,11 @@ async fn list_backups(
     AuthUser(_claims): AuthUser,
     Path(project_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>> {
-    let row = sqlx::query_as::<_, AppEnvRow>(
-        "SELECT app_key, env FROM projects WHERE id = $1",
-    )
-    .bind(project_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound)?;
+    let row = sqlx::query_as::<_, AppEnvRow>("SELECT app_key, env FROM projects WHERE id = $1")
+        .bind(project_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound)?;
 
     // Run `square-dbctl list --app <app> --env <env> --json`
     let output = tokio::process::Command::new(&state.cfg.dbctl_bin)
@@ -72,13 +70,11 @@ async fn restore_backup(
 ) -> Result<(StatusCode, Json<serde_json::Value>)> {
     crate::middleware::require_role(&claims.role, &["owner", "admin"])?;
 
-    let row = sqlx::query_as::<_, AppEnvRow>(
-        "SELECT app_key, env FROM projects WHERE id = $1",
-    )
-    .bind(project_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound)?;
+    let row = sqlx::query_as::<_, AppEnvRow>("SELECT app_key, env FROM projects WHERE id = $1")
+        .bind(project_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound)?;
 
     let job_id: Uuid = sqlx::query_scalar(
         "INSERT INTO provisioning_jobs (action, status, requested_by, project_id, request_payload)

@@ -1,10 +1,10 @@
 [package]
-name = "astra-db"
+name = "axiomdb-gateway"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "astra-db"
+name = "axiomdb-gateway"
 path = "src/main.rs"
 
 [dependencies]
@@ -24,6 +24,8 @@ sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-native-tls", "u
 jsonwebtoken = "9"
 argon2 = "0.5"
 rand = "0.8"
+totp-rs = { version = "5.5", features = ["gen_secret"] }
+base32 = "0.4"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

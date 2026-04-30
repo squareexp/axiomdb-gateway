@@ -34,7 +34,7 @@ pub enum ExecError {
 const PROVISION_TIMEOUT_SECS: u64 = 120;
 
 /// Execute `square-dbctl provision --app <app> --env <env> --json`.
-/// 
+///
 /// Runs as the current OS process user (expected: `opsdc`).
 /// Returns structured output parsed from JSON stdout.
 pub async fn run_provision(
@@ -148,7 +148,7 @@ pub async fn run_deprovision(dbctl_bin: &str, app: &str, env: &str) -> Result<()
 // ---------------------------------------------------------------------------
 
 /// Parse JSON output from square-dbctl provision.
-/// 
+///
 /// Expected shape (square-dbctl --json mode):
 /// ```json
 /// {
@@ -160,9 +160,13 @@ pub async fn run_deprovision(dbctl_bin: &str, app: &str, env: &str) -> Result<()
 ///   "direct_key": "DIRECT_URL_SERVERS_PROD"
 /// }
 /// ```
-/// 
+///
 /// Falls back to heuristic parsing if the binary doesn't yet support --json.
-fn parse_provision_output(stdout: &str, app: &str, env: &str) -> Result<ProvisionOutput, ExecError> {
+fn parse_provision_output(
+    stdout: &str,
+    app: &str,
+    env: &str,
+) -> Result<ProvisionOutput, ExecError> {
     // Try JSON first
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout) {
         let get = |key: &str| {
@@ -201,8 +205,7 @@ fn parse_provision_output(stdout: &str, app: &str, env: &str) -> Result<Provisio
 /// Remove connection strings that might appear in raw output.
 fn redact(s: &str) -> String {
     // Replace postgres://user:pass@host/db patterns
-    let re = regex_lite::Regex::new(r#"postgres://[^\s'"]++"#).unwrap_or_else(|_| {
-        regex_lite::Regex::new("postgres://[^[:space:]]+").unwrap()
-    });
+    let re = regex_lite::Regex::new(r#"postgres://[^\s'"]++"#)
+        .unwrap_or_else(|_| regex_lite::Regex::new("postgres://[^[:space:]]+").unwrap());
     re.replace_all(s, "postgres://[REDACTED]").to_string()
 }

@@ -44,20 +44,36 @@ impl IntoResponse for AppError {
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED", self.to_string()),
             AppError::Forbidden => (StatusCode::FORBIDDEN, "FORBIDDEN", self.to_string()),
             AppError::Validation(m) => (StatusCode::BAD_REQUEST, "VALIDATION_ERROR", m.clone()),
-            AppError::BranchLimitExceeded => (StatusCode::CONFLICT, "BRANCH_LIMIT_EXCEEDED", self.to_string()),
+            AppError::BranchLimitExceeded => (
+                StatusCode::CONFLICT,
+                "BRANCH_LIMIT_EXCEEDED",
+                self.to_string(),
+            ),
             AppError::Conflict(m) => (StatusCode::CONFLICT, "CONFLICT", m.clone()),
-            AppError::Executor(m) => (StatusCode::INTERNAL_SERVER_ERROR, "EXECUTOR_ERROR", m.clone()),
+            AppError::Executor(m) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "EXECUTOR_ERROR",
+                m.clone(),
+            ),
             AppError::Sqlx(e) => {
                 // Detect branch cap trigger
                 if e.to_string().contains("branch limit exceeded") {
                     return AppError::BranchLimitExceeded.into_response();
                 }
                 tracing::error!("sqlx: {e}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", "database error".into())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DB_ERROR",
+                    "database error".into(),
+                )
             }
             AppError::Internal(e) => {
                 tracing::error!("internal: {e}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "internal server error".into())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "internal server error".into(),
+                )
             }
         };
 

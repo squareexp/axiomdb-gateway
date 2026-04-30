@@ -57,7 +57,9 @@ async fn get_rows(
 
     // Validate table name: alphanumeric + underscore only
     if !table.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(crate::error::AppError::Validation("invalid table name".into()));
+        return Err(crate::error::AppError::Validation(
+            "invalid table name".into(),
+        ));
     }
 
     Ok(Json(json!({

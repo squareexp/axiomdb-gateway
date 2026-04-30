@@ -60,8 +60,8 @@ async fn monitoring_summary(
         let mut sys = state.sys.lock().await;
         sys.refresh_all();
         sys.refresh_memory();
-        let cpu: f32 = sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>()
-            / sys.cpus().len().max(1) as f32;
+        let cpu: f32 =
+            sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / sys.cpus().len().max(1) as f32;
         (
             cpu,
             sys.used_memory() / 1024 / 1024,
@@ -99,8 +99,9 @@ async fn monitoring_stream(
     State(_state): State<AppState>,
     AuthUser(_claims): AuthUser,
     Path(_project_id): Path<Uuid>,
-) -> axum::response::Sse<impl futures::Stream<Item = std::result::Result<axum::response::sse::Event, Infallible>>>
-{
+) -> axum::response::Sse<
+    impl futures::Stream<Item = std::result::Result<axum::response::sse::Event, Infallible>>,
+> {
     use tokio_stream::StreamExt;
 
     let stream =
