@@ -35,11 +35,7 @@ jobs:
             git fetch --all --prune
             git reset --hard origin/main
 
-            if [ -f /home/opsdc/.creds/astradb-core.env ]; then
-              set -a
-              . /home/opsdc/.creds/astradb-core.env
-              set +a
-            fi
+            export ASTRADB_CORE_ENV=/home/opsdc/.creds/astradb-core.env
             chmod +x ./migrate.sh
             ./migrate.sh
 
