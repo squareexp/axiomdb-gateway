@@ -240,14 +240,30 @@ async fn get_project_credentials(
     Ok(Json(json!({
         "project_id": project_id,
         "database": db_row.database_name,
-        "runtime_key": db_row.runtime_key,
-        "direct_key": db_row.direct_key,
+        "runtime_key": "DATABASE_URL",
+        "direct_key": "DIRECT_URL",
         "database_url": runtime_url,
         "direct_url": direct_url
     })))
 }
 
 fn canonical_project_url(raw: &str, port: u16) -> Result<String> {
+    canonical_project_url_with_database(raw, port, None)
+}
+
+pub(crate) fn canonical_project_url_for_database(
+    raw: &str,
+    port: u16,
+    database: &str,
+) -> Result<String> {
+    canonical_project_url_with_database(raw, port, Some(database))
+}
+
+fn canonical_project_url_with_database(
+    raw: &str,
+    port: u16,
+    database_override: Option<&str>,
+) -> Result<String> {
     let url = raw.trim().trim_matches('"').trim_matches('\'');
     let body = url.strip_prefix("postgresql://").ok_or_else(|| {
         AppError::Internal(anyhow::anyhow!(
@@ -267,6 +283,8 @@ fn canonical_project_url(raw: &str, port: u16) -> Result<String> {
     let (database, query) = db_and_query
         .split_once('?')
         .map_or((db_and_query, ""), |(database, query)| (database, query));
+
+    let database = database_override.unwrap_or(database);
 
     if userinfo.is_empty() || database.is_empty() {
         return Err(AppError::Internal(anyhow::anyhow!(
