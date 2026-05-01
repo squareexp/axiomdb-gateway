@@ -37,7 +37,7 @@ jobs:
 
             export ASTRADB_CORE_ENV=/home/opsdc/.creds/astradb-core.env
             chmod +x ./migrate.sh
-            ./migrate.sh
+            sudo env ASTRADB_CORE_ENV="$ASTRADB_CORE_ENV" ./migrate.sh
 
             cargo build --release
             sudo install -m 0755 target/release/axiomdb-gateway /usr/local/bin/axiomdb-gateway
