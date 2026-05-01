@@ -37,6 +37,9 @@ pub struct ProjectDatabase {
 #[derive(Debug, Serialize)]
 pub struct CreateProjectResponse {
     pub project: ProjectOut,
+    pub main_branch: BranchOut,
+    /// Backward-compatible metadata for older CLI/Web clients. This is key
+    /// metadata only, never raw credentials.
     pub database: DatabaseOut,
 }
 
@@ -54,4 +57,17 @@ pub struct DatabaseOut {
     pub database_name: String,
     pub runtime_key: String,
     pub direct_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BranchOut {
+    pub id: Uuid,
+    pub branch_name: String,
+    pub database_name: String,
+    pub source_database: String,
+    pub lifespan: String,
+    pub protected: bool,
+    pub is_default: bool,
+    pub status: String,
+    pub expires_at: Option<DateTime<Utc>>,
 }

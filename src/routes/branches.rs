@@ -4,6 +4,7 @@ use axum::{
     routing::{delete, get},
     Json, Router,
 };
+use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -41,7 +42,9 @@ async fn list_branches(
     Path(project_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>> {
     let branches = sqlx::query_as::<_, Branch>(
-        "SELECT * FROM project_branches WHERE project_id=$1 AND status='active' ORDER BY created_at",
+        "SELECT * FROM project_branches
+         WHERE project_id=$1 AND status <> 'deleted'
+         ORDER BY is_default DESC, created_at",
     )
     .bind(project_id)
     .fetch_all(&state.db)
@@ -58,6 +61,8 @@ async fn list_branches(
 #[derive(Deserialize)]
 pub struct CreateBranchRequest {
     pub branch_name: String,
+    pub source_branch_id: Option<Uuid>,
+    pub lifespan: Option<String>,
 }
 
 async fn create_branch(
@@ -76,6 +81,14 @@ async fn create_branch(
             "branch_name must use lowercase letters, digits, hyphens, or underscores".into(),
         ));
     }
+    if branch_name == "main" {
+        return Err(AppError::Validation(
+            "main is reserved and already created with each project".into(),
+        ));
+    }
+
+    let lifespan = normalize_lifespan(body.lifespan.as_deref())?;
+    let (ttl_seconds, expires_at) = lifespan_window(&lifespan);
 
     let active_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM project_branches WHERE project_id=$1 AND status='active'",
@@ -109,12 +122,33 @@ async fn create_branch(
     .await?
     .ok_or(AppError::NotFound)?;
 
+    let source_branch = match body.source_branch_id {
+        Some(source_branch_id) => sqlx::query_as::<_, Branch>(
+            "SELECT * FROM project_branches
+             WHERE id=$1 AND project_id=$2 AND status='active' AND deleted_at IS NULL",
+        )
+        .bind(source_branch_id)
+        .bind(project_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound)?,
+        None => sqlx::query_as::<_, Branch>(
+            "SELECT * FROM project_branches
+             WHERE project_id=$1 AND is_default=true AND status='active' AND deleted_at IS NULL
+             ORDER BY created_at ASC LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound)?,
+    };
+
     // Derive branch DB name: <source>_br_<branch_name>
     let branch_db = format!("{}_br_{branch_name}", db_row.database_name);
 
     crate::executor::run_branch_create(
         &state.cfg.dbctl_bin,
-        &db_row.database_name,
+        &source_branch.database_name,
         &branch_db,
         &db_row.owner_role,
         &db_row.runtime_role,
@@ -127,15 +161,20 @@ async fn create_branch(
     // The error type maps to 409 BRANCH_LIMIT_EXCEEDED in AppError
     let branch: Branch = sqlx::query_as(
         "INSERT INTO project_branches
-             (project_id, branch_name, database_name, source_database, status, created_by)
-         VALUES ($1, $2, $3, $4, 'active', $5)
+             (project_id, parent_branch_id, branch_name, database_name, source_database, status,
+              created_by, lifespan, expires_at, ttl_seconds, is_default, protected)
+         VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, false, false)
          RETURNING *",
     )
     .bind(project_id)
+    .bind(source_branch.id)
     .bind(&branch_name)
     .bind(&branch_db)
-    .bind(&db_row.database_name)
+    .bind(&source_branch.database_name)
     .bind(claims.sub)
+    .bind(&lifespan)
+    .bind(expires_at)
+    .bind(ttl_seconds)
     .fetch_one(&state.db)
     .await?;
 
@@ -146,7 +185,14 @@ async fn create_branch(
     )
     .bind(claims.sub)
     .bind(branch.id.to_string())
-    .bind(json!({ "branch_name": &branch_name, "database": &branch_db }))
+    .bind(json!({
+        "branch_name": &branch_name,
+        "database": &branch_db,
+        "source_branch_id": source_branch.id,
+        "source_database": source_branch.database_name,
+        "lifespan": &lifespan,
+        "expires_at": expires_at
+    }))
     .execute(&state.db)
     .await?;
 
@@ -171,10 +217,18 @@ async fn delete_branch(
     .await?
     .ok_or(AppError::NotFound)?;
 
-    sqlx::query("UPDATE project_branches SET status='deleted' WHERE id=$1")
-        .bind(branch.id)
-        .execute(&state.db)
-        .await?;
+    if branch.protected || branch.is_default || branch.branch_name == "main" {
+        return Err(AppError::Forbidden);
+    }
+
+    sqlx::query(
+        "UPDATE project_branches
+         SET status='deleted', deleted_at=now(), updated_at=now()
+         WHERE id=$1",
+    )
+    .bind(branch.id)
+    .execute(&state.db)
+    .await?;
 
     sqlx::query(
         "INSERT INTO audit_events (actor_user_id, action, target_type, target_id, metadata)
@@ -187,6 +241,33 @@ async fn delete_branch(
     .await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn normalize_lifespan(value: Option<&str>) -> Result<String> {
+    let normalized = value.unwrap_or("7d").trim().to_lowercase();
+    match normalized.as_str() {
+        "7d" | "7days" | "7 days" => Ok("7d".to_string()),
+        "1m" | "1month" | "1 month" => Ok("1m".to_string()),
+        "6m" | "6months" | "6 months" => Ok("6m".to_string()),
+        "1y" | "1year" | "1 year" => Ok("1y".to_string()),
+        "forever" | "permanent" => Ok("forever".to_string()),
+        _ => Err(AppError::Validation(
+            "lifespan must be one of 7d, 1m, 6m, 1y, forever".into(),
+        )),
+    }
+}
+
+fn lifespan_window(lifespan: &str) -> (Option<i64>, Option<chrono::DateTime<Utc>>) {
+    let seconds = match lifespan {
+        "7d" => Some(7 * 24 * 60 * 60),
+        "1m" => Some(30 * 24 * 60 * 60),
+        "6m" => Some(183 * 24 * 60 * 60),
+        "1y" => Some(365 * 24 * 60 * 60),
+        _ => None,
+    };
+
+    let expires_at = seconds.map(|seconds| Utc::now() + Duration::seconds(seconds));
+    (seconds, expires_at)
 }
 
 async fn get_branch_credentials(
@@ -320,7 +401,7 @@ fn key_safe_slug(value: &str, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::branch_env_key;
+    use super::{branch_env_key, lifespan_window, normalize_lifespan};
     use crate::routes::projects::canonical_project_url_for_database;
 
     #[test]
@@ -356,5 +437,20 @@ mod tests {
         assert!(direct.contains("sslmode=require"));
         assert!(!runtime.contains("localhost"));
         assert!(!direct.contains("10.0.0.10"));
+    }
+
+    #[test]
+    fn normalizes_branch_lifespan_values() {
+        assert_eq!(normalize_lifespan(None).unwrap(), "7d");
+        assert_eq!(normalize_lifespan(Some("1 month")).unwrap(), "1m");
+        assert_eq!(normalize_lifespan(Some("permanent")).unwrap(), "forever");
+        assert!(normalize_lifespan(Some("3d")).is_err());
+    }
+
+    #[test]
+    fn forever_lifespan_has_no_expiry() {
+        let (ttl, expires_at) = lifespan_window("forever");
+        assert!(ttl.is_none());
+        assert!(expires_at.is_none());
     }
 }

@@ -12,7 +12,12 @@ use crate::{
     error::{AppError, Result},
     executor,
     middleware::{require_role, AuthUser},
-    models::project::{CreateProjectResponse, DatabaseOut, Project, ProjectDatabase, ProjectOut},
+    models::{
+        branch::Branch,
+        project::{
+            BranchOut, CreateProjectResponse, DatabaseOut, Project, ProjectDatabase, ProjectOut,
+        },
+    },
     state::AppState,
 };
 
@@ -136,6 +141,29 @@ async fn create_project(
     .fetch_one(&mut *tx)
     .await?;
 
+    let main_branch: Branch = sqlx::query_as(
+        "INSERT INTO project_branches
+             (project_id, branch_name, database_name, source_database, status, created_by,
+              is_default, protected, lifespan)
+         VALUES ($1, 'main', $2, $2, 'active', $3, true, true, 'forever')
+         ON CONFLICT (project_id, branch_name) DO UPDATE
+           SET database_name = EXCLUDED.database_name,
+               source_database = EXCLUDED.source_database,
+               status = 'active',
+               is_default = true,
+               protected = true,
+               lifespan = 'forever',
+               expires_at = NULL,
+               deleted_at = NULL,
+               updated_at = now()
+         RETURNING *",
+    )
+    .bind(project.id)
+    .bind(&prov.database)
+    .bind(claims.sub)
+    .fetch_one(&mut *tx)
+    .await?;
+
     // Mark job succeeded + link to project
     sqlx::query(
         "UPDATE provisioning_jobs
@@ -164,6 +192,21 @@ async fn create_project(
     .execute(&mut *tx)
     .await?;
 
+    sqlx::query(
+        "INSERT INTO audit_events (actor_user_id, action, target_type, target_id, metadata)
+         VALUES ($1, 'branch.created', 'branch', $2, $3)",
+    )
+    .bind(claims.sub)
+    .bind(main_branch.id.to_string())
+    .bind(json!({
+        "branch_name": "main",
+        "database": &prov.database,
+        "protected": true,
+        "lifespan": "forever"
+    }))
+    .execute(&mut *tx)
+    .await?;
+
     tx.commit().await?;
 
     // Step 4: Return — key names only, never raw URLs
@@ -176,6 +219,17 @@ async fn create_project(
                 name: project.name,
                 app_key: project.app_key,
                 env: project.env,
+            },
+            main_branch: BranchOut {
+                id: main_branch.id,
+                branch_name: main_branch.branch_name,
+                database_name: main_branch.database_name,
+                source_database: main_branch.source_database,
+                lifespan: main_branch.lifespan,
+                protected: main_branch.protected,
+                is_default: main_branch.is_default,
+                status: main_branch.status,
+                expires_at: main_branch.expires_at,
             },
             database: DatabaseOut {
                 database_name: db_row.database_name,
@@ -207,7 +261,18 @@ async fn get_project(
             .fetch_all(&state.db)
             .await?;
 
-    Ok(Json(json!({ "project": project, "databases": databases })))
+    let branches = sqlx::query_as::<_, Branch>(
+        "SELECT * FROM project_branches
+         WHERE project_id=$1 AND status <> 'deleted'
+         ORDER BY is_default DESC, created_at ASC",
+    )
+    .bind(project.id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(
+        json!({ "project": project, "databases": databases, "branches": branches }),
+    ))
 }
 
 async fn get_project_credentials(
