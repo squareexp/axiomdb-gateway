@@ -120,6 +120,73 @@ pub async fn run_smoke(dbctl_bin: &str, app: &str, env: &str) -> Result<String, 
     }
 }
 
+/// Execute `square-dbctl branch-create` to create the physical branch database.
+pub async fn run_branch_create(
+    dbctl_bin: &str,
+    source_db: &str,
+    branch_db: &str,
+    owner_role: &str,
+    runtime_role: &str,
+    readonly_role: &str,
+) -> Result<String, ExecError> {
+    let mut output = tokio::time::timeout(
+        Duration::from_secs(120),
+        Command::new(dbctl_bin)
+            .args([
+                "branch-create",
+                "--source-db",
+                source_db,
+                "--branch-db",
+                branch_db,
+                "--owner",
+                owner_role,
+                "--runtime",
+                runtime_role,
+                "--readonly",
+                readonly_role,
+            ])
+            .output(),
+    )
+    .await
+    .map_err(|_| ExecError::Timeout(120))?
+    .map_err(ExecError::Io)?;
+
+    if !output.status.success() {
+        output = tokio::time::timeout(
+            Duration::from_secs(120),
+            Command::new("sudo")
+                .args([
+                    "-n",
+                    dbctl_bin,
+                    "branch-create",
+                    "--source-db",
+                    source_db,
+                    "--branch-db",
+                    branch_db,
+                    "--owner",
+                    owner_role,
+                    "--runtime",
+                    runtime_role,
+                    "--readonly",
+                    readonly_role,
+                ])
+                .output(),
+        )
+        .await
+        .map_err(|_| ExecError::Timeout(120))?
+        .map_err(ExecError::Io)?;
+    }
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(ExecError::ProvisionFailed {
+            code: output.status.code().unwrap_or(-1),
+            stderr: redact(&String::from_utf8_lossy(&output.stderr)),
+        })
+    }
+}
+
 /// Execute `square-dbctl deprovision --app <app> --env <env> --yes`.
 #[allow(dead_code)]
 pub async fn run_deprovision(dbctl_bin: &str, app: &str, env: &str) -> Result<(), ExecError> {

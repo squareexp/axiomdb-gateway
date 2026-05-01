@@ -67,10 +67,42 @@ async fn create_branch(
     Json(body): Json<CreateBranchRequest>,
 ) -> Result<(StatusCode, Json<Branch>)> {
     let branch_name = body.branch_name.trim().to_lowercase();
+    if branch_name.is_empty()
+        || !branch_name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return Err(AppError::Validation(
+            "branch_name must use lowercase letters, digits, hyphens, or underscores".into(),
+        ));
+    }
+
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM project_branches WHERE project_id=$1 AND status='active'",
+    )
+    .bind(project_id)
+    .fetch_one(&state.db)
+    .await?;
+    if active_count >= 10 {
+        return Err(AppError::BranchLimitExceeded);
+    }
+
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM project_branches WHERE project_id=$1 AND branch_name=$2 AND status='active'",
+    )
+    .bind(project_id)
+    .bind(&branch_name)
+    .fetch_optional(&state.db)
+    .await?;
+    if existing.is_some() {
+        return Err(AppError::Conflict(format!(
+            "branch already exists: {branch_name}"
+        )));
+    }
 
     // Look up source database (prod / default branch)
-    let source_db: String = sqlx::query_scalar(
-        "SELECT database_name FROM project_databases WHERE project_id=$1 LIMIT 1",
+    let db_row = sqlx::query_as::<_, crate::models::project::ProjectDatabase>(
+        "SELECT * FROM project_databases WHERE project_id=$1 ORDER BY created_at DESC LIMIT 1",
     )
     .bind(project_id)
     .fetch_optional(&state.db)
@@ -78,7 +110,18 @@ async fn create_branch(
     .ok_or(AppError::NotFound)?;
 
     // Derive branch DB name: <source>_br_<branch_name>
-    let branch_db = format!("{source_db}_br_{branch_name}");
+    let branch_db = format!("{}_br_{branch_name}", db_row.database_name);
+
+    crate::executor::run_branch_create(
+        &state.cfg.dbctl_bin,
+        &db_row.database_name,
+        &branch_db,
+        &db_row.owner_role,
+        &db_row.runtime_role,
+        &db_row.readonly_role,
+    )
+    .await
+    .map_err(|e| AppError::Executor(e.to_string()))?;
 
     // Insert — DB trigger will raise if >= 10 active branches
     // The error type maps to 409 BRANCH_LIMIT_EXCEEDED in AppError
@@ -91,7 +134,7 @@ async fn create_branch(
     .bind(project_id)
     .bind(&branch_name)
     .bind(&branch_db)
-    .bind(&source_db)
+    .bind(&db_row.database_name)
     .bind(claims.sub)
     .fetch_one(&state.db)
     .await?;
