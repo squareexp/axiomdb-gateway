@@ -31,18 +31,19 @@ jobs:
             fi
             rustup toolchain install stable --profile minimal --component rustfmt --component clippy
 
-            cd /home/apps/sq/.dbs/infrastructure/astra-gateway
+            gateway_dir=/home/apps/sq/.dbs/infrastructure/astra-gateway
+            cd "$gateway_dir"
             git fetch --all --prune
             git reset --hard origin/main
 
             export ASTRADB_CORE_ENV=/home/opsdc/.creds/astradb-core.env
             chmod +x ./migrate.sh
-            sudo env ASTRADB_CORE_ENV="$ASTRADB_CORE_ENV" ./migrate.sh
+            sudo ASTRADB_CORE_ENV="$ASTRADB_CORE_ENV" "$gateway_dir/migrate.sh"
 
             cargo build --release
-            sudo install -m 0755 target/release/axiomdb-gateway /usr/local/bin/axiomdb-gateway
+            sudo install -m 0755 "$gateway_dir/target/release/axiomdb-gateway" /usr/local/bin/axiomdb-gateway
             sudo ln -sfn /usr/local/bin/axiomdb-gateway /usr/local/bin/astra-db
-            sudo install -m 0644 astradb-core.service /etc/systemd/system/astradb-core.service
+            sudo install -m 0644 "$gateway_dir/astradb-core.service" /etc/systemd/system/astradb-core.service
             sudo systemctl daemon-reload
             sudo systemctl restart astradb-core
             sudo systemctl is-active astradb-core
