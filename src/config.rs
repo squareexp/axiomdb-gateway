@@ -15,6 +15,8 @@ pub struct Config {
     pub jwt_refresh_ttl_secs: u64,
     /// Absolute path to the square-dbctl wrapper binary on the VPS.
     pub dbctl_bin: String,
+    /// Env-file containing generated project database URLs.
+    pub secret_file: String,
 }
 
 impl Config {
@@ -33,6 +35,9 @@ impl Config {
                 .unwrap_or(604_800),
             dbctl_bin: env::var("DBCTL_BIN")
                 .unwrap_or_else(|_| "/usr/local/bin/square-dbctl".into()),
+            secret_file: env::var("AXIOMDB_SECRET_FILE")
+                .or_else(|_| env::var("ASTRADB_SECRET_FILE"))
+                .unwrap_or_else(|_| "/home/opsdc/.creds/zone.env".into()),
         })
     }
 }

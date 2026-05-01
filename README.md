@@ -43,6 +43,21 @@ cd axiomdb-gateway
 cargo run
 ```
 
+## Branch Prisma Credentials
+
+The gateway exposes first-class branch URL retrieval:
+
+```http
+GET /api/v1/projects/:project_id/branches/:branch_ref/credentials
+Authorization: Bearer <jwt>
+```
+
+`branch_ref` can be a branch UUID or branch name. The response is canonicalized for Prisma:
+
+- `database_url` uses `db.squareexp.com:6432` and `sslmode=require`
+- `direct_url` uses `db.squareexp.com:5432` and `sslmode=require`
+- successful reads write `branch.credentials.viewed` to `audit_events`
+
 ## 🐛 Found an Issue? (Report it)
 
 If something's acting sus or you found a bug, don't just leave us on read. Report it so we can patch it up.

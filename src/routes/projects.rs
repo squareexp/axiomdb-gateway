@@ -223,17 +223,8 @@ async fn get_project_credentials(
     .await?
     .ok_or(AppError::NotFound)?;
 
-    let env_contents = std::fs::read_to_string("/home/opsdc/.creds/zone.env")
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("failed reading env store: {e}")))?;
-
-    let lookup = |key: &str| -> Option<String> {
-        env_contents
-            .lines()
-            .find_map(|line| line.strip_prefix(&format!("{key}=")).map(|v| v.to_string()))
-    };
-
-    let runtime_url = lookup(&db_row.runtime_key).ok_or(AppError::NotFound)?;
-    let direct_url = lookup(&db_row.direct_key).ok_or(AppError::NotFound)?;
+    let runtime_url = credential_value_from_store(&state.cfg.secret_file, &db_row.runtime_key)?;
+    let direct_url = credential_value_from_store(&state.cfg.secret_file, &db_row.direct_key)?;
     let runtime_url = canonical_project_url(&runtime_url, RUNTIME_DB_PORT)?;
     let direct_url = canonical_project_url(&direct_url, DIRECT_DB_PORT)?;
 
@@ -245,6 +236,16 @@ async fn get_project_credentials(
         "database_url": runtime_url,
         "direct_url": direct_url
     })))
+}
+
+pub(crate) fn credential_value_from_store(secret_file: &str, key: &str) -> Result<String> {
+    let env_contents = std::fs::read_to_string(secret_file)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("failed reading env store: {e}")))?;
+
+    env_contents
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{key}=")).map(|v| v.to_string()))
+        .ok_or(AppError::NotFound)
 }
 
 fn canonical_project_url(raw: &str, port: u16) -> Result<String> {

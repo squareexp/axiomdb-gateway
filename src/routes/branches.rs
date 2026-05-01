@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{
     error::{AppError, Result},
     middleware::AuthUser,
-    models::branch::Branch,
+    models::{branch::Branch, project::Project},
     state::AppState,
 };
 
@@ -148,7 +148,7 @@ async fn delete_branch(
 
 async fn get_branch_credentials(
     State(state): State<AppState>,
-    AuthUser(_claims): AuthUser,
+    AuthUser(claims): AuthUser,
     Path((project_id, branch_ref)): Path<(Uuid, String)>,
 ) -> Result<Json<serde_json::Value>> {
     let branch = if let Ok(branch_id) = Uuid::parse_str(&branch_ref) {
@@ -170,6 +170,13 @@ async fn get_branch_credentials(
     }
     .ok_or(AppError::NotFound)?;
 
+    let project =
+        sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id=$1 AND status='active'")
+            .bind(project_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(AppError::NotFound)?;
+
     let db_row = sqlx::query_as::<_, crate::models::project::ProjectDatabase>(
         "SELECT * FROM project_databases WHERE project_id=$1 ORDER BY created_at DESC LIMIT 1",
     )
@@ -178,17 +185,14 @@ async fn get_branch_credentials(
     .await?
     .ok_or(AppError::NotFound)?;
 
-    let env_contents = std::fs::read_to_string("/home/opsdc/.creds/zone.env")
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("failed reading env store: {e}")))?;
-
-    let lookup = |key: &str| -> Option<String> {
-        env_contents
-            .lines()
-            .find_map(|line| line.strip_prefix(&format!("{key}=")).map(|v| v.to_string()))
-    };
-
-    let runtime_url = lookup(&db_row.runtime_key).ok_or(AppError::NotFound)?;
-    let direct_url = lookup(&db_row.direct_key).ok_or(AppError::NotFound)?;
+    let runtime_url = crate::routes::projects::credential_value_from_store(
+        &state.cfg.secret_file,
+        &db_row.runtime_key,
+    )?;
+    let direct_url = crate::routes::projects::credential_value_from_store(
+        &state.cfg.secret_file,
+        &db_row.direct_key,
+    )?;
     let runtime_url = crate::routes::projects::canonical_project_url_for_database(
         &runtime_url,
         6432,
@@ -200,14 +204,114 @@ async fn get_branch_credentials(
         &branch.database_name,
     )?;
 
+    let runtime_key = branch_env_key(
+        "DATABASE_URL",
+        &project.app_key,
+        &project.env,
+        &branch.branch_name,
+    );
+    let direct_key = branch_env_key(
+        "DIRECT_URL",
+        &project.app_key,
+        &project.env,
+        &branch.branch_name,
+    );
+
+    sqlx::query(
+        "INSERT INTO audit_events (actor_user_id, action, target_type, target_id, metadata)
+         VALUES ($1, 'branch.credentials.viewed', 'branch', $2, $3)",
+    )
+    .bind(claims.sub)
+    .bind(branch.id.to_string())
+    .bind(json!({
+        "project_id": project_id,
+        "branch_name": &branch.branch_name,
+        "database": &branch.database_name
+    }))
+    .execute(&state.db)
+    .await?;
+
     Ok(Json(json!({
         "project_id": project_id,
         "branch_id": branch.id,
         "branch_name": branch.branch_name,
         "database": branch.database_name,
-        "runtime_key": "DATABASE_URL",
-        "direct_key": "DIRECT_URL",
+        "runtime_key": runtime_key,
+        "direct_key": direct_key,
         "database_url": runtime_url,
         "direct_url": direct_url
     })))
+}
+
+pub(crate) fn branch_env_key(prefix: &str, app: &str, env: &str, branch: &str) -> String {
+    format!(
+        "{}_{}_{}_BR_{}",
+        prefix,
+        key_safe_slug(app, "APP"),
+        key_safe_slug(env, "ENV"),
+        key_safe_slug(branch, "BRANCH")
+    )
+}
+
+fn key_safe_slug(value: &str, fallback: &str) -> String {
+    let mut output = String::new();
+    let mut last_was_separator = false;
+
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch.to_ascii_uppercase());
+            last_was_separator = false;
+        } else if !last_was_separator {
+            output.push('_');
+            last_was_separator = true;
+        }
+    }
+
+    let output = output.trim_matches('_');
+    if output.is_empty() {
+        fallback.to_string()
+    } else {
+        output.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::branch_env_key;
+    use crate::routes::projects::canonical_project_url_for_database;
+
+    #[test]
+    fn builds_deterministic_branch_env_keys() {
+        assert_eq!(
+            branch_env_key("DATABASE_URL", "admin4", "dev", "feature-x"),
+            "DATABASE_URL_ADMIN4_DEV_BR_FEATURE_X"
+        );
+        assert_eq!(
+            branch_env_key("DIRECT_URL", "square api", "stage-env", "feature 141754"),
+            "DIRECT_URL_SQUARE_API_STAGE_ENV_BR_FEATURE_141754"
+        );
+    }
+
+    #[test]
+    fn canonicalizes_branch_urls_to_public_prisma_contract() {
+        let runtime = canonical_project_url_for_database(
+            "postgresql://app:secret@localhost:5432/sq_admin4_dev?sslmode=disable",
+            6432,
+            "sq_admin4_dev_br_feature-x",
+        )
+        .unwrap();
+        let direct = canonical_project_url_for_database(
+            "postgresql://owner:secret@10.0.0.10:6543/sq_admin4_dev",
+            5432,
+            "sq_admin4_dev_br_feature-x",
+        )
+        .unwrap();
+
+        assert!(runtime.contains("@db.squareexp.com:6432/sq_admin4_dev_br_feature-x"));
+        assert!(direct.contains("@db.squareexp.com:5432/sq_admin4_dev_br_feature-x"));
+        assert!(runtime.contains("sslmode=require"));
+        assert!(direct.contains("sslmode=require"));
+        assert!(!runtime.contains("localhost"));
+        assert!(!direct.contains("10.0.0.10"));
+    }
 }
