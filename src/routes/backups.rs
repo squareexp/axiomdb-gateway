@@ -90,16 +90,25 @@ async fn plan_restore(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    let output = tokio::process::Command::new(&state.cfg.dbctl_bin)
-        .args([
-            "backup-restore",
-            "--app",
-            &row.app_key,
-            "--env",
-            &row.env,
-            "--confirm",
-            "plan",
-        ])
+    let mut command = tokio::process::Command::new(&state.cfg.dbctl_bin);
+    command.args([
+        "backup-restore",
+        "--app",
+        &row.app_key,
+        "--env",
+        &row.env,
+        "--confirm",
+        "plan",
+    ]);
+    if let Some(point_in_time) = body
+        .point_in_time
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        command.args(["--point-in-time", point_in_time]);
+    }
+
+    let output = command
         .output()
         .await
         .map_err(|e| AppError::Executor(e.to_string()))?;

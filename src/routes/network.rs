@@ -353,6 +353,7 @@ fn ttl_to_expiry(value: Option<&str>) -> Result<Option<chrono::DateTime<chrono::
         return Ok(None);
     };
     let seconds = match value {
+        "forever" | "permanent" => return Ok(None),
         "24h" => 24 * 60 * 60,
         "7d" => 7 * 24 * 60 * 60,
         "30d" | "1m" => 30 * 24 * 60 * 60,
@@ -393,6 +394,7 @@ mod tests {
     #[test]
     fn parses_network_ttl() {
         assert!(ttl_to_expiry(None).unwrap().is_none());
+        assert!(ttl_to_expiry(Some("forever")).unwrap().is_none());
         assert!(ttl_to_expiry(Some("24h")).unwrap().is_some());
         assert!(ttl_to_expiry(Some("3h")).is_err());
     }
