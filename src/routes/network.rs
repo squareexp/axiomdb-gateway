@@ -196,7 +196,19 @@ async fn create_project_rule(
     .execute(&state.db)
     .await?;
 
-    let applied = reconcile_network_rule(&state, &rule.cidr, &rule.ports).await?;
+    let applied = match reconcile_network_rule(&state, &rule.cidr, &rule.ports).await {
+        Ok(applied) => applied,
+        Err(error) => {
+            tracing::error!(rule_id = %rule.id, cidr = %rule.cidr, ports = %rule.ports, error = %error, "network rule reconcile failed");
+            sqlx::query("UPDATE network_rules SET deleted_at=now() WHERE id=$1")
+                .bind(rule.id)
+                .execute(&state.db)
+                .await?;
+            return Err(AppError::Executor(
+                "network access update failed".to_string(),
+            ));
+        }
+    };
 
     Ok((
         StatusCode::CREATED,
@@ -216,7 +228,18 @@ async fn set_public_mode(
     Path(project_id): Path<Uuid>,
     Json(body): Json<PublicModeRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    crate::middleware::require_role(&claims.role, &["owner"])?;
+    crate::middleware::require_role(
+        &claims.role,
+        &[
+            "owner",
+            "operator",
+            "admin",
+            "super_admin",
+            "SUPER_ADMIN",
+            "ADMIN",
+            "OPERATOR",
+        ],
+    )?;
     let mode = body.mode.trim();
     match mode {
         "restricted" => {}

@@ -15,7 +15,9 @@ StandardOutput=journal
 StandardError=journal
 
 # Security hardening
-NoNewPrivileges=true
+# The gateway runs controlled square-dbctl operations through passwordless sudo.
+# Keep this off or network/branch/database reconcile commands cannot apply.
+NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only

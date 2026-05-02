@@ -50,11 +50,14 @@ impl IntoResponse for AppError {
                 self.to_string(),
             ),
             AppError::Conflict(m) => (StatusCode::CONFLICT, "CONFLICT", m.clone()),
-            AppError::Executor(m) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "EXECUTOR_ERROR",
-                m.clone(),
-            ),
+            AppError::Executor(m) => {
+                tracing::error!("executor: {m}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "EXECUTOR_ERROR",
+                    "operation failed".into(),
+                )
+            }
             AppError::Sqlx(e) => {
                 // Detect branch cap trigger
                 if e.to_string().contains("branch limit exceeded") {
