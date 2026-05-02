@@ -170,6 +170,48 @@ pub async fn run_dbctl_json(
     serde_json::from_str(candidate).map_err(|error| ExecError::Parse(error.to_string()))
 }
 
+/// Execute a square-dbctl command and return stdout. Falls back to passwordless sudo.
+pub async fn run_dbctl(
+    dbctl_bin: &str,
+    args: &[&str],
+    timeout_secs: u64,
+) -> Result<String, ExecError> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        Command::new(dbctl_bin).args(args).output(),
+    )
+    .await
+    .map_err(|_| ExecError::Timeout(timeout_secs))?
+    .map_err(ExecError::Io)?;
+
+    let output = if output.status.success() {
+        output
+    } else {
+        tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            Command::new("sudo")
+                .arg("-n")
+                .arg(dbctl_bin)
+                .args(args)
+                .output(),
+        )
+        .await
+        .map_err(|_| ExecError::Timeout(timeout_secs))?
+        .map_err(ExecError::Io)?
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        return Err(ExecError::ProvisionFailed {
+            code: output.status.code().unwrap_or(-1),
+            stderr: redact(&stderr),
+        });
+    }
+
+    Ok(redact(&stdout).trim().to_string())
+}
+
 /// Execute `square-dbctl branch-create` to create the physical branch database.
 pub async fn run_branch_create(
     dbctl_bin: &str,

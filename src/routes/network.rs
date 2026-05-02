@@ -196,7 +196,12 @@ async fn create_project_rule(
     .execute(&state.db)
     .await?;
 
-    Ok((StatusCode::CREATED, Json(json!({ "rule": rule }))))
+    let applied = reconcile_network_rule(&state, &rule.cidr, &rule.ports).await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "rule": rule, "applied": applied })),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -258,7 +263,44 @@ async fn set_public_mode(
     .execute(&state.db)
     .await?;
 
-    Ok(Json(json!({ "policy": policy })))
+    let applied = crate::executor::run_dbctl_json(
+        &state.cfg.dbctl_bin,
+        &["public-mode", "--mode", mode, "--yes"],
+        60,
+    )
+    .await
+    .map_err(|error| AppError::Executor(error.to_string()))?;
+
+    Ok(Json(json!({ "policy": policy, "applied": applied })))
+}
+
+async fn reconcile_network_rule(
+    state: &AppState,
+    cidr: &str,
+    ports: &str,
+) -> Result<serde_json::Value> {
+    let mut applied = Vec::new();
+
+    if ports == "runtime" || ports == "both" {
+        let output = crate::executor::run_dbctl(
+            &state.cfg.dbctl_bin,
+            &["allow-pgbouncer-cidr", "--cidr", cidr],
+            60,
+        )
+        .await
+        .map_err(|error| AppError::Executor(error.to_string()))?;
+        applied.push(json!({ "target": "runtime", "port": 6432, "output": output }));
+    }
+
+    if ports == "direct" || ports == "both" {
+        let output =
+            crate::executor::run_dbctl(&state.cfg.dbctl_bin, &["allow-cidr", "--cidr", cidr], 60)
+                .await
+                .map_err(|error| AppError::Executor(error.to_string()))?;
+        applied.push(json!({ "target": "direct", "port": 5432, "output": output }));
+    }
+
+    Ok(json!({ "cidr": cidr, "ports": ports, "targets": applied }))
 }
 
 #[derive(Debug, serde::Serialize, sqlx::FromRow)]
