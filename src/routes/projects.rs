@@ -4,8 +4,11 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::FromRow;
+use tokio::time::{sleep, Duration};
 use uuid::Uuid;
 
 use crate::{
@@ -24,6 +27,8 @@ use crate::{
 const CANONICAL_DB_HOST: &str = "db.squareexp.com";
 const RUNTIME_DB_PORT: u16 = 6432;
 const DIRECT_DB_PORT: u16 = 5432;
+const PROJECT_CREATE_LOCK_WAIT_ATTEMPTS: usize = 20;
+const PROJECT_CREATE_LOCK_WAIT_MS: u64 = 500;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -70,9 +75,59 @@ async fn create_project(
 ) -> Result<(StatusCode, Json<CreateProjectResponse>)> {
     require_role(&claims.role, &["owner", "admin", "operator"])?;
 
-    let app = body.app_key.trim().to_lowercase();
-    let env = body.env.trim().to_lowercase();
+    let app = normalize_name("app_key", &body.app_key)?;
+    let env = normalize_name("env", &body.env)?;
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(AppError::Validation("name is required".into()));
+    }
+
     let slug = format!("{app}-{env}");
+    let lock_key = format!("project:create:{slug}");
+
+    let mut lock = state.db.acquire().await?;
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtext($1))")
+        .bind(&lock_key)
+        .fetch_one(&mut *lock)
+        .await?;
+
+    if !acquired {
+        drop(lock);
+        for _ in 0..PROJECT_CREATE_LOCK_WAIT_ATTEMPTS {
+            sleep(Duration::from_millis(PROJECT_CREATE_LOCK_WAIT_MS)).await;
+            if let Some(existing) = load_create_project_response(&state, &app, &env).await? {
+                return Ok((StatusCode::OK, Json(existing)));
+            }
+        }
+
+        return Err(AppError::Conflict(format!(
+            "project {slug} is already provisioning; refresh in a few seconds"
+        )));
+    }
+
+    let result = create_project_locked(&state, &claims, name, &app, &env, &slug).await;
+    if let Err(error) = sqlx::query("SELECT pg_advisory_unlock(hashtext($1))")
+        .bind(&lock_key)
+        .execute(&mut *lock)
+        .await
+    {
+        tracing::error!("failed to release project create lock for {slug}: {error}");
+    }
+
+    result
+}
+
+async fn create_project_locked(
+    state: &AppState,
+    claims: &crate::routes::auth::Claims,
+    name: &str,
+    app: &str,
+    env: &str,
+    slug: &str,
+) -> Result<(StatusCode, Json<CreateProjectResponse>)> {
+    if let Some(existing) = load_create_project_response(state, app, env).await? {
+        return Ok((StatusCode::OK, Json(existing)));
+    }
 
     // Step 1: Insert pending provisioning job
     let job_id: Uuid = sqlx::query_scalar(
@@ -82,7 +137,7 @@ async fn create_project(
          RETURNING id",
     )
     .bind(claims.sub)
-    .bind(json!({ "app": &app, "env": &env, "name": &body.name }))
+    .bind(json!({ "app": app, "env": env, "name": name }))
     .fetch_one(&state.db)
     .await?;
 
@@ -93,7 +148,7 @@ async fn create_project(
         .await?;
 
     // Step 2: Execute real VPS provision via square-dbctl
-    let prov = match executor::run_provision(&state.cfg.dbctl_bin, &app, &env).await {
+    let prov = match executor::run_provision(&state.cfg.dbctl_bin, app, env).await {
         Ok(p) => p,
         Err(e) => {
             sqlx::query(
@@ -115,12 +170,17 @@ async fn create_project(
     let project: Project = sqlx::query_as(
         "INSERT INTO projects (slug, name, app_key, env, status, created_by)
          VALUES ($1, $2, $3, $4, 'active', $5)
+         ON CONFLICT (app_key, env) DO UPDATE
+           SET slug = EXCLUDED.slug,
+               name = EXCLUDED.name,
+               status = 'active',
+               updated_at = now()
          RETURNING *",
     )
-    .bind(&slug)
-    .bind(&body.name)
-    .bind(&app)
-    .bind(&env)
+    .bind(slug)
+    .bind(name)
+    .bind(app)
+    .bind(env)
     .bind(claims.sub)
     .fetch_one(&mut *tx)
     .await?;
@@ -129,6 +189,13 @@ async fn create_project(
         "INSERT INTO project_databases
              (project_id, database_name, owner_role, runtime_role, readonly_role, runtime_key, direct_key)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (database_name) DO UPDATE
+           SET project_id = EXCLUDED.project_id,
+               owner_role = EXCLUDED.owner_role,
+               runtime_role = EXCLUDED.runtime_role,
+               readonly_role = EXCLUDED.readonly_role,
+               runtime_key = EXCLUDED.runtime_key,
+               direct_key = EXCLUDED.direct_key
          RETURNING *",
     )
     .bind(project.id)
@@ -188,7 +255,7 @@ async fn create_project(
     )
     .bind(claims.sub)
     .bind(project.id.to_string())
-    .bind(json!({ "slug": &slug, "database": &prov.database }))
+    .bind(json!({ "slug": slug, "database": &prov.database }))
     .execute(&mut *tx)
     .await?;
 
@@ -212,32 +279,155 @@ async fn create_project(
     // Step 4: Return — key names only, never raw URLs
     Ok((
         StatusCode::CREATED,
-        Json(CreateProjectResponse {
+        Json(create_project_response(project, db_row, main_branch)),
+    ))
+}
+
+fn normalize_name(label: &str, value: &str) -> Result<String> {
+    let normalized = value.trim().to_lowercase();
+    if normalized.is_empty()
+        || !normalized
+            .chars()
+            .enumerate()
+            .all(|(idx, c)| c.is_ascii_lowercase() || c.is_ascii_digit() && idx > 0 || c == '_')
+        || !normalized
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase())
+    {
+        return Err(AppError::Validation(format!(
+            "{label} must start with a lowercase letter and use only lowercase letters, digits, or underscores"
+        )));
+    }
+    Ok(normalized)
+}
+
+async fn load_create_project_response(
+    state: &AppState,
+    app: &str,
+    env: &str,
+) -> Result<Option<CreateProjectResponse>> {
+    let row = sqlx::query_as::<_, CreateProjectJoinedRow>(
+        "SELECT
+           p.id AS project_id,
+           p.slug AS project_slug,
+           p.name AS project_name,
+           p.app_key AS project_app_key,
+           p.env AS project_env,
+           d.database_name AS database_name,
+           d.runtime_key AS runtime_key,
+           d.direct_key AS direct_key,
+           b.id AS branch_id,
+           b.branch_name AS branch_name,
+           b.database_name AS branch_database_name,
+           b.source_database AS branch_source_database,
+           b.lifespan AS branch_lifespan,
+           b.protected AS branch_protected,
+           b.is_default AS branch_is_default,
+           b.status AS branch_status,
+           b.expires_at AS branch_expires_at
+         FROM projects p
+         JOIN project_databases d ON d.project_id = p.id
+         JOIN project_branches b
+           ON b.project_id = p.id
+          AND b.branch_name = 'main'
+          AND b.status = 'active'
+          AND b.deleted_at IS NULL
+         WHERE p.app_key=$1
+           AND p.env=$2
+           AND p.status='active'
+         ORDER BY p.created_at ASC
+         LIMIT 1",
+    )
+    .bind(app)
+    .bind(env)
+    .fetch_optional(&state.db)
+    .await?;
+
+    Ok(row.map(CreateProjectJoinedRow::into_response))
+}
+
+#[derive(FromRow)]
+struct CreateProjectJoinedRow {
+    project_id: Uuid,
+    project_slug: String,
+    project_name: String,
+    project_app_key: String,
+    project_env: String,
+    database_name: String,
+    runtime_key: String,
+    direct_key: String,
+    branch_id: Uuid,
+    branch_name: String,
+    branch_database_name: String,
+    branch_source_database: String,
+    branch_lifespan: String,
+    branch_protected: bool,
+    branch_is_default: bool,
+    branch_status: String,
+    branch_expires_at: Option<DateTime<Utc>>,
+}
+
+impl CreateProjectJoinedRow {
+    fn into_response(self) -> CreateProjectResponse {
+        CreateProjectResponse {
             project: ProjectOut {
-                id: project.id,
-                slug: project.slug,
-                name: project.name,
-                app_key: project.app_key,
-                env: project.env,
+                id: self.project_id,
+                slug: self.project_slug,
+                name: self.project_name,
+                app_key: self.project_app_key,
+                env: self.project_env,
             },
             main_branch: BranchOut {
-                id: main_branch.id,
-                branch_name: main_branch.branch_name,
-                database_name: main_branch.database_name,
-                source_database: main_branch.source_database,
-                lifespan: main_branch.lifespan,
-                protected: main_branch.protected,
-                is_default: main_branch.is_default,
-                status: main_branch.status,
-                expires_at: main_branch.expires_at,
+                id: self.branch_id,
+                branch_name: self.branch_name,
+                database_name: self.branch_database_name,
+                source_database: self.branch_source_database,
+                lifespan: self.branch_lifespan,
+                protected: self.branch_protected,
+                is_default: self.branch_is_default,
+                status: self.branch_status,
+                expires_at: self.branch_expires_at,
             },
             database: DatabaseOut {
-                database_name: db_row.database_name,
-                runtime_key: db_row.runtime_key,
-                direct_key: db_row.direct_key,
+                database_name: self.database_name,
+                runtime_key: self.runtime_key,
+                direct_key: self.direct_key,
             },
-        }),
-    ))
+        }
+    }
+}
+
+fn create_project_response(
+    project: Project,
+    db_row: ProjectDatabase,
+    main_branch: Branch,
+) -> CreateProjectResponse {
+    CreateProjectResponse {
+        project: ProjectOut {
+            id: project.id,
+            slug: project.slug,
+            name: project.name,
+            app_key: project.app_key,
+            env: project.env,
+        },
+        main_branch: BranchOut {
+            id: main_branch.id,
+            branch_name: main_branch.branch_name,
+            database_name: main_branch.database_name,
+            source_database: main_branch.source_database,
+            lifespan: main_branch.lifespan,
+            protected: main_branch.protected,
+            is_default: main_branch.is_default,
+            status: main_branch.status,
+            expires_at: main_branch.expires_at,
+        },
+        database: DatabaseOut {
+            database_name: db_row.database_name,
+            runtime_key: db_row.runtime_key,
+            direct_key: db_row.direct_key,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::time::Duration;
 use tokio::process::Command;
 use tracing::{debug, error, info};
@@ -118,6 +119,55 @@ pub async fn run_smoke(dbctl_bin: &str, app: &str, env: &str) -> Result<String, 
             stderr: redact(&String::from_utf8_lossy(&output.stderr)),
         })
     }
+}
+
+/// Execute a square-dbctl command and parse the last JSON line from stdout.
+pub async fn run_dbctl_json(
+    dbctl_bin: &str,
+    args: &[&str],
+    timeout_secs: u64,
+) -> Result<Value, ExecError> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        Command::new(dbctl_bin).args(args).output(),
+    )
+    .await
+    .map_err(|_| ExecError::Timeout(timeout_secs))?
+    .map_err(ExecError::Io)?;
+
+    let output = if output.status.success() {
+        output
+    } else {
+        tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            Command::new("sudo")
+                .arg("-n")
+                .arg(dbctl_bin)
+                .args(args)
+                .output(),
+        )
+        .await
+        .map_err(|_| ExecError::Timeout(timeout_secs))?
+        .map_err(ExecError::Io)?
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        return Err(ExecError::ProvisionFailed {
+            code: output.status.code().unwrap_or(-1),
+            stderr: redact(&stderr),
+        });
+    }
+
+    let candidate = stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| line.starts_with('{') || line.starts_with('['))
+        .ok_or_else(|| ExecError::Parse("dbctl command did not return JSON".into()))?;
+
+    serde_json::from_str(candidate).map_err(|error| ExecError::Parse(error.to_string()))
 }
 
 /// Execute `square-dbctl branch-create` to create the physical branch database.

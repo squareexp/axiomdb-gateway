@@ -30,6 +30,10 @@ pub fn router() -> Router<AppState> {
             "/projects/:project_id/branches/:branch_ref/credentials",
             get(get_branch_credentials),
         )
+        .route(
+            "/projects/:project_id/branches/:branch_ref/metrics/summary",
+            get(get_branch_metrics),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +115,40 @@ async fn create_branch(
         return Err(AppError::Conflict(format!(
             "branch already exists: {branch_name}"
         )));
+    }
+
+    let project =
+        sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id=$1 AND status='active'")
+            .bind(project_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(AppError::NotFound)?;
+
+    let usage = crate::executor::run_dbctl_json(
+        &state.cfg.dbctl_bin,
+        &[
+            "project-usage",
+            "--app",
+            &project.app_key,
+            "--env",
+            &project.env,
+        ],
+        30,
+    )
+    .await
+    .map_err(|error| AppError::Executor(error.to_string()))?;
+    let storage_used = usage
+        .get("storageUsedBytes")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(0);
+    let storage_limit = usage
+        .get("storageLimitBytes")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(i64::MAX);
+    if storage_used >= storage_limit {
+        return Err(AppError::Conflict(
+            "project storage quota is full; extend storage before creating another branch".into(),
+        ));
     }
 
     // Look up source database (prod / default branch)
@@ -364,6 +402,68 @@ async fn get_branch_credentials(
         "direct_key": direct_key,
         "database_url": runtime_url,
         "direct_url": direct_url
+    })))
+}
+
+async fn get_branch_metrics(
+    State(state): State<AppState>,
+    AuthUser(_claims): AuthUser,
+    Path((project_id, branch_ref)): Path<(Uuid, String)>,
+) -> Result<Json<serde_json::Value>> {
+    let branch = if let Ok(branch_id) = Uuid::parse_str(&branch_ref) {
+        sqlx::query_as::<_, Branch>(
+            "SELECT * FROM project_branches WHERE id=$1 AND project_id=$2 AND status='active'",
+        )
+        .bind(branch_id)
+        .bind(project_id)
+        .fetch_optional(&state.db)
+        .await?
+    } else {
+        sqlx::query_as::<_, Branch>(
+            "SELECT * FROM project_branches WHERE branch_name=$1 AND project_id=$2 AND status='active'",
+        )
+        .bind(branch_ref.trim().to_lowercase())
+        .bind(project_id)
+        .fetch_optional(&state.db)
+        .await?
+    }
+    .ok_or(AppError::NotFound)?;
+
+    let project =
+        sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id=$1 AND status='active'")
+            .bind(project_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(AppError::NotFound)?;
+
+    let metrics = crate::executor::run_dbctl_json(
+        &state.cfg.dbctl_bin,
+        &["database-metrics", "--database", &branch.database_name],
+        30,
+    )
+    .await
+    .map_err(|error| AppError::Executor(error.to_string()))?;
+    let usage = crate::executor::run_dbctl_json(
+        &state.cfg.dbctl_bin,
+        &[
+            "project-usage",
+            "--app",
+            &project.app_key,
+            "--env",
+            &project.env,
+        ],
+        30,
+    )
+    .await
+    .map_err(|error| AppError::Executor(error.to_string()))?;
+
+    Ok(Json(json!({
+        "project_id": project_id,
+        "branch_id": branch.id,
+        "branch_name": branch.branch_name,
+        "database": branch.database_name,
+        "metrics": metrics,
+        "usage": usage
     })))
 }
 
