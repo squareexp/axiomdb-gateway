@@ -47,4 +47,15 @@ jobs:
             sudo systemctl daemon-reload
             sudo systemctl restart astradb-core
             sudo systemctl is-active astradb-core
-            curl -fsS https://opsdc.squareexp.com/api/v1/health >/dev/null || curl -skI https://opsdc.squareexp.com | head -n 1
+            ok=false
+            for attempt in $(seq 1 20); do
+              if curl -fsS https://opsdc.squareexp.com/api/v1/health >/dev/null; then
+                ok=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "$ok" != true ]; then
+              sudo journalctl -u astradb-core -n 80 --no-pager
+              exit 1
+            fi
